@@ -31,16 +31,41 @@ let empty = fun x -> failwith (Printf.sprintf "Undefined variable %s" x)
 *)
 let update x v s = fun y -> if x = y then v else s y
 
+let boolToInt v = match v with
+  | true  -> 1
+  | false -> 0
+
+let intToBool v = match v with
+  | 0 -> false
+  | _ -> true
+
+let evalBinop op a b = match op with
+  | "+"  -> a + b
+  | "-"  -> a - b
+  | "*"  -> a * b
+  | "/"  -> a / b
+  | "%"  -> a mod b
+  | "<"  -> boolToInt (a <  b)
+  | "<=" -> boolToInt (a <= b)
+  | ">"  -> boolToInt (a >  b)
+  | ">=" -> boolToInt (a >= b)
+  | "==" -> boolToInt (a =  b)
+  | "!=" -> boolToInt (a <> b)
+  | "&&" -> boolToInt (intToBool a && intToBool b)
+  | "!!" -> boolToInt (intToBool a || intToBool b)
+  | unknown -> failwith (Printf.sprintf "Undefined binop %s" unknown)
+
 (* An example of a non-trivial state: *)                                                   
 let s = update "x" 1 @@ update "y" 2 @@ update "z" 3 @@ update "t" 4 empty
 
-(* Some testing; comment this definition out when submitting the solution. *)
+(* Some testing; comment this definition out when submitting the solution.
 let _ =
   List.iter
     (fun x ->
        try  Printf.printf "%s=%d\n" x @@ s x
        with Failure s -> Printf.printf "%s\n" s
     ) ["x"; "a"; "y"; "z"; "t"; "b"]
+*)
 
 (* Expression evaluator
 
@@ -49,5 +74,7 @@ let _ =
    Takes a state and an expression, andreturns the value of the expression in 
    the given state.
 *)
-let eval = failwith "Not implemented yet"
-                    
+let rec eval s e = match e with
+  | Const i -> i
+  | Var   name -> s name
+  | Binop (op, e1, e2) -> evalBinop op (eval s e1) (eval s e2)
