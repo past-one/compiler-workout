@@ -2,7 +2,7 @@
    The library provides "@type ..." syntax extension and plugins like show, etc.
 *)
 open GT 
-    
+
 (* Simple expressions: syntax and semantics *)
 module Expr =
   struct
@@ -34,6 +34,30 @@ module Expr =
     *)
     let update x v s = fun y -> if x = y then v else s y
 
+    let boolToInt v = match v with
+      | true  -> 1
+      | false -> 0
+
+    let intToBool v = match v with
+      | 0 -> false
+      | _ -> true
+
+    let evalBinop op a b = match op with
+      | "+"  -> a + b
+      | "-"  -> a - b
+      | "*"  -> a * b
+      | "/"  -> a / b
+      | "%"  -> a mod b
+      | "<"  -> boolToInt (a <  b)
+      | "<=" -> boolToInt (a <= b)
+      | ">"  -> boolToInt (a >  b)
+      | ">=" -> boolToInt (a >= b)
+      | "==" -> boolToInt (a =  b)
+      | "!=" -> boolToInt (a <> b)
+      | "&&" -> boolToInt (intToBool a && intToBool b)
+      | "!!" -> boolToInt (intToBool a || intToBool b)
+      | unknown -> failwith (Printf.sprintf "Undefined binop %s" unknown)
+
     (* Expression evaluator
 
           val eval : state -> t -> int
@@ -41,10 +65,13 @@ module Expr =
        Takes a state and an expression, and returns the value of the expression in 
        the given state.
     *)
-    let eval _ = failwith "Not implemented yet"
+    let rec eval s e = match e with
+      | Const i -> i
+      | Var   name -> s name
+      | Binop (op, e1, e2) -> evalBinop op (eval s e1) (eval s e2)
 
   end
-                    
+
 (* Simple statements: syntax and sematics *)
 module Stmt =
   struct
