@@ -34,28 +34,22 @@ module Expr =
     *)
     let update x v s = fun y -> if x = y then v else s y
 
-    let boolToInt v = match v with
-      | true  -> 1
-      | false -> 0
+    let toInt f x y = if f x y then 1 else 0
 
-    let intToBool v = match v with
-      | 0 -> false
-      | _ -> true
-
-    let evalBinop op a b = match op with
-      | "+"  -> a + b
-      | "-"  -> a - b
-      | "*"  -> a * b
-      | "/"  -> a / b
-      | "%"  -> a mod b
-      | "<"  -> boolToInt (a <  b)
-      | "<=" -> boolToInt (a <= b)
-      | ">"  -> boolToInt (a >  b)
-      | ">=" -> boolToInt (a >= b)
-      | "==" -> boolToInt (a =  b)
-      | "!=" -> boolToInt (a <> b)
-      | "&&" -> boolToInt (intToBool a && intToBool b)
-      | "!!" -> boolToInt (intToBool a || intToBool b)
+    let binop = function
+      | "+"  -> ( + )
+      | "-"  -> ( - )
+      | "*"  -> ( * )
+      | "/"  -> ( / )
+      | "%"  -> ( mod )
+      | "<"  -> toInt ( <  )
+      | "<=" -> toInt ( <= )
+      | ">"  -> toInt ( >  )
+      | ">=" -> toInt ( >= )
+      | "==" -> toInt ( =  )
+      | "!=" -> toInt ( <> )
+      | "&&" -> toInt (fun x y -> (x <> 0) && (y <> 0))
+      | "!!" -> toInt (fun x y -> (x <> 0) || (y <> 0))
       | unknown -> failwith (Printf.sprintf "Undefined binop %s" unknown)
 
     (* Expression evaluator
@@ -65,10 +59,10 @@ module Expr =
        Takes a state and an expression, and returns the value of the expression in 
        the given state.
     *)
-    let rec eval s e = match e with
-      | Const i -> i
-      | Var   name -> s name
-      | Binop (op, e1, e2) -> evalBinop op (eval s e1) (eval s e2)
+    let rec eval state = function
+      | Const i          -> i
+      | Var   name       -> state name
+      | Binop (op, x, y) -> (binop op) (eval state x) (eval state y)
 
   end
 
@@ -84,7 +78,7 @@ module Stmt =
     (* composition                      *) | Seq    of t * t with show
 
     (* The type of configuration: a state, an input stream, an output stream *)
-    type config = Expr.state * int list * int list 
+    type config = Expr.state * int list * int list
 
     (* Statement evaluator
 
@@ -92,6 +86,11 @@ module Stmt =
 
        Takes a configuration and a statement, and returns another configuration
     *)
-    let eval _ = failwith "Not implemented yet"
-                                                         
+    let rec eval config stmt = match config, stmt with
+      | (s, z::i, o), Read   var      -> (Expr.update var z s, i, o)
+      | (s, i, o),    Write  e        -> (s, i, o @ [Expr.eval s e])
+      | (s, i, o),    Assign (var, e) -> (Expr.update var (Expr.eval s e) s, i, o)
+      | conf,         Seq    (a, b)   -> eval (eval conf a) b
+      | _,            Read   _        -> failwith "Empty input stream read"
+
   end
