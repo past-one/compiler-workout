@@ -5,13 +5,13 @@ open GT
 
 (* Opening a library for combinator-based syntax analysis *)
 open Ostap.Combinators
-       
+
 (* Simple expressions: syntax and semantics *)
 module Expr =
   struct
-    
-    (* The type for expressions. Note, in regular OCaml there is no "@type..." 
-       notation, it came from GT. 
+
+    (* The type for expressions. Note, in regular OCaml there is no "@type..."
+       notation, it came from GT.
     *)
     @type t =
     (* integer constant *) | Const of int
@@ -25,14 +25,14 @@ module Expr =
         +, -                 --- addition, subtraction
         *, /, %              --- multiplication, division, reminder
     *)
-                                                            
+
     (* State: a partial map from variables to integer values. *)
-    type state = string -> int 
+    type state = string -> int
 
     (* Empty state: maps every variable into nothing. *)
     let empty = fun x -> failwith (Printf.sprintf "Undefined variable %s" x)
 
-    (* Update: non-destructively "modifies" the state s by binding the variable x 
+    (* Update: non-destructively "modifies" the state s by binding the variable x
       to value v and returns the new state.
     *)
     let update x v s = fun y -> if x = y then v else s y
@@ -58,8 +58,8 @@ module Expr =
     (* Expression evaluator
 
           val eval : state -> t -> int
- 
-       Takes a state and an expression, and returns the value of the expression in 
+
+       Takes a state and an expression, and returns the value of the expression in
        the given state.
     *)
     let rec eval state = function
@@ -67,14 +67,33 @@ module Expr =
       | Var   name       -> state name
       | Binop (op, x, y) -> (binop op) (eval state x) (eval state y)
 
+    let ostapBinops ops = let ostapBinop op = (ostap ($(op)), fun x y -> Binop (op, x, y))
+      in List.map ostapBinop ops;;
+
     (* Expression parser. You can use the following terminals:
 
          IDENT   --- a non-empty identifier a-zA-Z[a-zA-Z0-9_]* as a string
-         DECIMAL --- a decimal constant [0-9]+ as a string
-   
+         DECIMAL --- a decimal constant [0-9]+ as an int
+
     *)
     ostap (
-      parse: empty {failwith "Not implemented yet"}
+      parse:
+        !(Ostap.Util.expr
+         (fun x -> x)
+         [|
+           `Lefta, ostapBinops ["!!"];
+           `Lefta, ostapBinops ["&&"];
+           `Nona,  ostapBinops ["<="; ">="; "<"; ">"; "=="; "!="];
+           `Lefta, ostapBinops ["+"; "-"];
+           `Lefta, ostapBinops ["*"; "/"; "%"]
+         |]
+         primary
+        );
+
+      primary: 
+          x:IDENT {Var x} 
+        | d:DECIMAL { Const d } 
+        | -"(" parse -")"
     )
 
   end
@@ -107,8 +126,19 @@ module Stmt =
       | _,            Read   _        -> failwith "Empty input stream read"
 
     (* Statement parser *)
+
     ostap (
-      parse: empty {failwith "Not implemented yet"}
+      parse: seq | stmt;
+
+      stmt: read | write | assign;
+
+      read: "read" -"(" x:IDENT -")" { Read x };
+
+      write: "write" -"(" e:!(Expr.parse) -")" { Write e };
+
+      assign: x:IDENT -":=" e:!(Expr.parse) { Assign (x, e) };
+
+      seq: a:stmt -";" b:parse { Seq (a, b) }
     )
 
   end
@@ -116,7 +146,7 @@ module Stmt =
 (* The top-level definitions *)
 
 (* The top-level syntax category is statement *)
-type t = Stmt.t    
+type t = Stmt.t
 
 (* Top-level evaluator
 
@@ -128,4 +158,4 @@ let eval p i =
   let _, _, o = Stmt.eval (Expr.empty, i, []) p in o
 
 (* Top-level parser *)
-let parse = Stmt.parse                                                     
+let parse = Stmt.parse

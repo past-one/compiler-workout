@@ -7,8 +7,8 @@ RC=../src/rc.opt
 check: $(TESTS) 
 
 $(TESTS): %: %.expr
-	cat $@.input | $(RC) -i $< > $@.log && diff $@.log orig/$@.log
-	cat $@.input | $(RC) -s $< > $@.log && diff $@.log orig/$@.log
+	cat $@.input | $(RC) -i $< > $@.log && diff --strip-trailing-cr $@.log orig/$@.log
+	cat $@.input | $(RC) -s $< > $@.log && diff --strip-trailing-cr $@.log orig/$@.log
 
 clean:
 	rm -f test*.log *.s *~ $(TESTS)
