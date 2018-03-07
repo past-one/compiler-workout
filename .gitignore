@@ -1,6 +1,7 @@
+*~
 *.o
-*.cmx
 *.cmi
+*.cmx
 *.opt
 .depend
 regression/**/*.log

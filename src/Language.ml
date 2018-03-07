@@ -62,6 +62,7 @@ module Expr =
        Takes a state and an expression, and returns the value of the expression in
        the given state.
     *)
+
     let rec eval state = function
       | Const i          -> i
       | Var   name       -> state name
@@ -90,9 +91,9 @@ module Expr =
          primary
         );
 
-      primary: 
-          x:IDENT {Var x} 
-        | d:DECIMAL { Const d } 
+      primary:
+          x:IDENT {Var x}
+        | d:DECIMAL { Const d }
         | -"(" parse -")"
     )
 
@@ -114,7 +115,7 @@ module Stmt =
 
     (* Statement evaluator
 
-          val eval : config -> t -> config
+         val eval : config -> t -> config
 
        Takes a configuration and a statement, and returns another configuration
     *)
@@ -123,22 +124,19 @@ module Stmt =
       | (s, i, o),    Write  e        -> (s, i, o @ [Expr.eval s e])
       | (s, i, o),    Assign (var, e) -> (Expr.update var (Expr.eval s e) s, i, o)
       | conf,         Seq    (a, b)   -> eval (eval conf a) b
-      | _,            Read   _        -> failwith "Empty input stream read"
+      | _,            Read   _        -> failwith "Unexpected end of input"
 
     (* Statement parser *)
 
     ostap (
-      parse: seq | stmt;
+      parse:
+          a:stmt -";" b:parse { Seq (a, b) }
+        | stmt;
 
-      stmt: read | write | assign;
-
-      read: "read" -"(" x:IDENT -")" { Read x };
-
-      write: "write" -"(" e:!(Expr.parse) -")" { Write e };
-
-      assign: x:IDENT -":=" e:!(Expr.parse) { Assign (x, e) };
-
-      seq: a:stmt -";" b:parse { Seq (a, b) }
+      stmt:
+          "read" -"(" x:IDENT -")"          { Read x }
+        | "write" -"(" e:!(Expr.parse) -")" { Write e }
+        | x:IDENT -":=" e:!(Expr.parse)     { Assign (x, e) }
     )
 
   end
