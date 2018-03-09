@@ -53,7 +53,7 @@ module Expr =
       | "!=" -> toInt ( <> )
       | "&&" -> toInt (fun x y -> (x <> 0) && (y <> 0))
       | "!!" -> toInt (fun x y -> (x <> 0) || (y <> 0))
-      | unknown -> failwith (Printf.sprintf "Undefined binop %s" unknown)
+      | op   -> failwith (Printf.sprintf "Undefined binop %s" op)
 
     (* Expression evaluator
 

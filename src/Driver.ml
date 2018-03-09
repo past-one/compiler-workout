@@ -8,7 +8,7 @@ let parse infile =
        inherit Util.Lexers.decimal s
        inherit Util.Lexers.ident ["read"; "write"] s
        inherit Util.Lexers.skip [
-	 Matcher.Skip.whitespaces " \t\n";
+	 Matcher.Skip.whitespaces " \t\n\r";
 	 Matcher.Skip.lineComment "--";
 	 Matcher.Skip.nestedComment "(*" "*)"
        ] s
