@@ -136,11 +136,11 @@ let compile (environment: env) (code: prg) : env * instr list =
   | _, R _ -> [Mov (a, b)]
   | _      -> [Mov (a, eax); Mov (eax, b)]
   in let compileInsn env i = match i with
-  | WRITE    -> let x, env = env#pop                   in env, [Push x; Call "_Lwrite"]
+  | WRITE    -> let x, env = env#pop                   in env, [Push x; Call "Lwrite"]
   | CONST z  -> let x, env = env#allocate              in env, [Mov (L z, x)]
   | ST var   -> let x, env = (env#global var)#pop      in env, swap x @@ M (env#loc var)
   | LD var   -> let x, env = (env#global var)#allocate in env, swap (M (env#loc var)) x
-  | READ     -> let x, env = env#allocate              in env, [Call "_Lread"; Mov (eax, x)]
+  | READ     -> let x, env = env#allocate              in env, [Call "Lread"; Mov (eax, x)]
   | BINOP op -> let x, y, env = env#popAndLook         in env, (
     let cmpF a b suf = [
       Mov (a, edx);
@@ -203,8 +203,8 @@ let genasm prog =
     )
     env#globals;
   Buffer.add_string asm "\t.text\n";
-  Buffer.add_string asm "\t.globl\t_main\n";
-  Buffer.add_string asm "_main:\n";
+  Buffer.add_string asm "\t.globl\tmain\n";
+  Buffer.add_string asm "main:\n";
   List.iter
     (fun i -> Buffer.add_string asm (Printf.sprintf "%s\n" @@ show i))
     code;
