@@ -40,7 +40,10 @@ type instr =
 (* pops from the hardware stack to the operand          *) | Pop   of opnd
 (* call a function by a name                            *) | Call  of string
 (* returns from a function                              *) | Ret
-
+(* a label in the code                                  *) | Label of string
+(* a conditional jump                                   *) | CJmp  of string * string
+(* a non-conditional jump                               *) | Jmp   of string
+                                                               
 (* Instruction printer *)
 let show instr =
   let binop = function
@@ -69,6 +72,9 @@ let show instr =
   | Pop    s           -> Printf.sprintf "\tpopl\t%s"      (opnd s)
   | Ret                -> "\tret"
   | Call   p           -> Printf.sprintf "\tcall\t%s" p
+  | Label  l           -> Printf.sprintf "%s:\n" l
+  | Jmp    l           -> Printf.sprintf "\tjmp\t%s" l
+  | CJmp  (s , l)      -> Printf.sprintf "\tj%s\t%s" s l
 
 (* Opening stack machine to use instructions without fully qualified names *)
 open SM
@@ -91,8 +97,9 @@ class env =
       let x, n =
   let rec allocate' = function
   | []                            -> ebx     , 0
-  | (S n)::_                      -> S (n+1) , n+1
+  | (S n)::_                      -> S (n+1) , n+2
   | (R n)::_ when n < num_of_regs -> R (n+1) , stack_slots
+  | (M _)::s                      -> allocate' s
   | _                             -> S 0     , 1
   in
   allocate' stack

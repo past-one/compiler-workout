@@ -108,8 +108,12 @@ module Stmt =
     (* read into the variable           *) | Read   of string
     (* write the value of an expression *) | Write  of Expr.t
     (* assignment                       *) | Assign of string * Expr.t
-    (* composition                      *) | Seq    of t * t with show
-
+    (* composition                      *) | Seq    of t * t 
+    (* empty statement                  *) | Skip
+    (* conditional                      *) | If     of Expr.t * t * t
+    (* loop with a pre-condition        *) | While  of Expr.t * t
+    (* loop with a post-condition       *) (* add yourself *)  with show
+                                                                    
     (* The type of configuration: a state, an input stream, an output stream *)
     type config = Expr.state * int list * int list
 
