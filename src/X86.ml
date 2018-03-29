@@ -43,7 +43,7 @@ type instr =
 (* a label in the code                                  *) | Label of string
 (* a conditional jump                                   *) | CJmp  of string * string
 (* a non-conditional jump                               *) | Jmp   of string
-                                                               
+
 (* Instruction printer *)
 let show instr =
   let binop = function
@@ -99,7 +99,6 @@ class env =
   | []                            -> ebx     , 0
   | (S n)::_                      -> S (n+1) , n+2
   | (R n)::_ when n < num_of_regs -> R (n+1) , stack_slots
-  | (M _)::s                      -> allocate' s
   | _                             -> S 0     , 1
   in
   allocate' stack
@@ -143,12 +142,19 @@ let compile (environment: env) (code: prg) : env * instr list =
   | _, R _ -> [Mov (a, b)]
   | _      -> [Mov (a, eax); Mov (eax, b)]
   in let compileInsn env i = match i with
-  | WRITE    -> let x, env = env#pop                   in env, [Push x; Call "Lwrite"]
-  | CONST z  -> let x, env = env#allocate              in env, [Mov (L z, x)]
-  | ST var   -> let x, env = (env#global var)#pop      in env, swap x @@ M (env#loc var)
-  | LD var   -> let x, env = (env#global var)#allocate in env, swap (M (env#loc var)) x
-  | READ     -> let x, env = env#allocate              in env, [Call "Lread"; Mov (eax, x)]
-  | BINOP op -> let x, y, env = env#popAndLook         in env, (
+  | LABEL l     -> env, [Label l]
+  | JMP   l     -> env, [Jmp l]
+  | WRITE       -> let x, env = env#pop                   in env, [Push x; Call "Lwrite"]
+  | CONST z     -> let x, env = env#allocate              in env, [Mov (L z, x)]
+  | ST var      -> let x, env = (env#global var)#pop      in env, swap x @@ M (env#loc var)
+  | LD var      -> let x, env = (env#global var)#allocate in env, swap (M (env#loc var)) x
+  | READ        -> let x, env = env#allocate              in env, [Call "Lread"; Mov (eax, x)]
+  | CJMP (k, l) -> let x, env = env#pop                   in env, (
+    match x with
+    | R _ -> [Binop ("cmp", L 0, x); CJmp (k, l)]
+    | _   -> [Mov (L 0, eax); Binop ("cmp", eax, x); CJmp (k, l)]
+    )
+  | BINOP op    -> let x, y, env = env#popAndLook         in env, (
     let cmpF a b suf = [
       Mov (a, edx);
       Binop ("^", eax, eax); (* set eax to zero first *)
@@ -183,7 +189,7 @@ let compile (environment: env) (code: prg) : env * instr list =
     | "&&" -> cmpF (L 0) x "ne" @ cmpF (L 0) y "ne" @ binop "&&" (x, y)
     | op   -> binop op (x, y)
   )
-  in let compile' (e, oldInstr) i = let e, newInstr = compileInsn e i in (e, oldInstr @ newInstr)
+  in let compile' (e, oldInstrs) i = let e, newInstr = compileInsn e i in (e, oldInstrs @ newInstr)
   in List.fold_left compile' (environment, []) code
 
 (* compiles a unit: generates x86 machine code for the stack program and surrounds it
