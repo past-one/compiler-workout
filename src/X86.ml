@@ -3,7 +3,7 @@
 (* The registers: *)
 let regs = [|"%ebx"; "%ecx"; "%esi"; "%edi"; "%eax"; "%edx"; "%ebp"; "%esp"|]
 
-(* We can not freely operate with all register; only 3 by now *)
+(* We can not freely operate with all register; only 4 (0..3) by now *)
 let num_of_regs = Array.length regs - 5
 
 (* We need to know the word size to calculate offsets correctly *)
@@ -90,13 +90,111 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile env code = failwith "Not implemented"
+let compile environment code =
+  let swap a b = match a, b with (* we can't move data directly from stack to memory or vice versa *)
+  | R _, _ -> [Mov (a, b)]
+  | _, R _ -> [Mov (a, b)]
+  | _      -> [Mov (a, eax); Mov (eax, b)]
+  in
+  let binop op = function
+  | a, R z -> [Binop (op, a, R z)]
+  | a, b   -> [
+    Mov (b, edx);
+    Binop (op, a, edx);
+    Mov (edx, b)
+    ]
+  in
+
+  let compileInsn env i = match i with
+  | JMP l       -> env, [Jmp l]
+  | LABEL l     -> env, [Label l]
+  | RET false   -> env, [Jmp env#epilogue]
+  | END         -> env, [
+    Label env#epilogue; Mov (ebp, esp); Pop ebp; Ret;
+    Meta (Printf.sprintf "\t.set %s, %d" env#lsize (env#allocated * word_size))
+  ] (* epilog *)
+
+  | WRITE       -> let x, env' = env#pop                   in env', [Push x; Call "Lwrite"; Pop eax]
+  | RET true    -> let x, env' = env#pop                   in env', [Mov (x, eax); Jmp env#epilogue]
+  | CONST z     -> let x, env' = env#allocate              in env', [Mov (L z, x)]
+  | READ        -> let x, env' = env#allocate              in env', [Call "Lread"; Mov (eax, x)]
+  | ST var      -> let x, env' = (env#global var)#pop      in env', swap x @@ env#loc var
+  | LD var      -> let x, env' = (env#global var)#allocate in env', swap (env#loc var) x
+
+  | CJMP (k, l) -> (
+    match env#pop with
+    | (R _) as x, env' -> env',                        [Binop ("cmp", L 0, x); CJmp (k, l)]
+    | x,          env' -> env', [Binop ("^", eax, eax); Binop ("cmp", eax, x); CJmp (k, l)]
+  )
+
+  | BEGIN (f, args, vars) ->
+    let env' = env#enter f args vars in
+    env', [Push ebp; Mov (esp, ebp); Binop ("-", M ("$" ^ env'#lsize), esp)] (* prolog *)
+  | CALL (f, argsNum, isFunc) ->
+    let rec pushArgs pushed e = function
+    | 0 -> pushed, e
+    | n -> let x, e' = e#pop in pushArgs (Push x :: pushed) e' @@ n - 1
+    in
+    let argPushes, env' = pushArgs [] env argsNum in
+    let argPop = match argsNum with
+    | 0 -> []
+    | _ -> [Binop ("+", L (argsNum * word_size), esp)]
+    in
+
+    let regs = env'#live_registers in
+    let regPushes = List.map (fun r -> Push r) regs in
+    let regPops = List.rev_map (fun r -> Pop r) regs in
+    let resultPop, env'' =
+      if isFunc
+      then let x, e' = env'#allocate in [Mov (eax, x)], e'
+      else [], env'
+    in
+    env'', regPushes @ argPushes @ [Call f] @ argPop @ regPops @ resultPop
+
+  | BINOP op -> let x, y, env' = env#popAndLook in env', (
+    let cmpF a b suf = [
+      Mov (a, edx);
+      Binop ("^", eax, eax); (* set eax to zero first *)
+      Binop ("cmp", edx, b);
+      Set (suf, "%al");
+      Mov (eax, b)
+    ]
+    in
+    let cmp = cmpF x y in
+    let div reg = [
+      Mov (y, eax);
+      Cltd; (* prepare eax *)
+      IDiv x;
+      Mov (reg, y)
+    ]
+    in
+    match op with
+    | "==" -> cmp "e"
+    | "!=" -> cmp "ne"
+    | ">"  -> cmp "g"
+    | ">=" -> cmp "ge"
+    | "<"  -> cmp "l"
+    | "<=" -> cmp "le"
+    | "/"  -> div eax
+    | "%"  -> div edx
+    | "!!" -> binop "!!" (x, y) @ cmpF (L 0) y "ne"
+    | "&&" -> cmpF (L 0) x "ne" @ cmpF (L 0) y "ne" @ binop "&&" (x, y)
+    | op   -> binop op (x, y)
+  )
+  in
+  let folding (e, oldInstr) i = let e, newInstr = compileInsn e i in (e, oldInstr @ newInstr) in
+  List.fold_left folding (environment, []) code
 
 (* A set of strings *)
 module S = Set.Make (String)
 
 (* Environment implementation *)
-let make_assoc l = List.combine l (List.init (List.length l) (fun x -> x))
+let make_assoc =
+  let rec make_assoc' n = function
+  | []       -> []
+  | hd :: tl -> (hd, n) :: make_assoc' (n + 1) tl
+  in
+  make_assoc' 0
 
 class env =
   object (self)
@@ -116,25 +214,29 @@ class env =
     (* allocates a fresh position on a symbolic stack *)
     method allocate =
       let x, n =
-  let rec allocate' = function
-  | []                            -> ebx     , 0
-  | (S n)::_                      -> S (n+1) , n+1
-  | (R n)::_ when n < num_of_regs -> R (n+1) , stack_slots
-  | (M _)::s                      -> allocate' s
-  | _                             -> S 0     , 1
-  in
-  allocate' stack
+        let rec allocate' = function
+        | []                            -> ebx     , 0
+        | (S n)::_                      -> S (n+1) , n+1
+        | (R n)::_ when n < num_of_regs -> R (n+1) , stack_slots
+        | _                             -> S 0     , 1
+        in
+        allocate' stack
       in
       x, {< stack_slots = max n stack_slots; stack = x::stack >}
 
-    (* pushes an operand to the symbolic stack *)
-    method push y = {< stack = y::stack >}
-
     (* pops one operand from the symbolic stack *)
-    method pop = let x::stack' = stack in x, {< stack = stack' >}
+    method pop = (
+      match stack with
+      | x::stack' -> x, {< stack = stack' >}
+      | _         -> failwith "pop with empty symbolic stack"
+      )
 
-    (* pops two operands from the symbolic stack *)
-    method pop2 = let x::y::stack' = stack in x, y, {< stack = stack' >}
+    (* pops one operand from the symbolic stack and also returns current stack head *)
+    method popAndLook = (
+      match stack with
+        | x::y::stack' -> x, y, {< stack = y::stack' >}
+        | _            -> failwith "popAndLook with empty symbolic stack"
+    )
 
     (* registers a global variable in the environment *)
     method global x  = {< globals = S.add ("global_" ^ x) globals >}
@@ -146,8 +248,13 @@ class env =
     method allocated = stack_slots
 
     (* enters a function *)
-    method enter f a l =
-      {< stack_slots = List.length l; stack = []; locals = make_assoc l; args = make_assoc a; fname = f >}
+    method enter f a l = {< 
+      stack_slots = List.length l;
+      stack = [];
+      locals = make_assoc l;
+      args = make_assoc a;
+      fname = f
+      >}
 
     (* returns a label for the epilogue *)
     method epilogue = Printf.sprintf "L%s_epilogue" fname
