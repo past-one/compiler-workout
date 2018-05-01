@@ -30,7 +30,7 @@ let fail (i: insn) = failwith @@ "Invalid instruction " ^ (GT.transform(insn) (n
 let split n l =
   let rec unzip (taken, rest) = function
   | 0 -> (List.rev taken, rest)
-  | n -> let h::tl = rest in unzip (h::taken, tl) (n-1)
+  | n -> (match rest with h::tl -> unzip (h::taken, tl) (n-1) | _ -> failwith "Unexpected end of splitten list")
   in
   unzip ([], l) n
 
@@ -46,20 +46,27 @@ let rec eval env config =
   let evalInsn (cstack, stack, ((s, i, o, r) as c)) insn = match insn with
   | BINOP op            ->
     (match stack with
-    | y::x::tl -> cstack, (Expr.binop op x y) :: tl, c
+    | y::x::tl -> cstack, Value.of_int (Expr.binop op (Value.to_int x) @@ Value.to_int y) :: tl, c
     | _ -> fail insn
     )
   | ST var              ->
     (match stack with
-    | z::tl    -> cstack, stack, (State.update var (Value.of_int z) s, i, o, r)
+    | hd::tl   -> cstack, tl, (State.update var hd s, i, o, r)
     | _ -> fail insn
     )
-  | LD var              -> cstack, (Value.to_int @@ State.eval s var)::stack, c
-  | CONST z             -> cstack, z::stack, c
+  | STA (var, n)        ->
+    let (splitted, stack') = split (n + 1) stack in
+    (match splitted with
+    | hd::args -> cstack, stack', (Stmt.update s var hd args, i, o, r)
+    | _ -> fail insn
+    )
+  | LD var              -> cstack, State.eval s var::stack, c
+  | STRING s            -> cstack, Value.of_string s::stack, c
+  | CONST z             -> cstack, Value.of_int z::stack, c
   | BEGIN (_, args, xs) ->
     let folding (state, stack) arg = match stack with
-    | z :: tl -> State.update arg (Value.of_int z) state, tl
-    | []      -> failwith "Not enough args on stack"
+    | hd::tl   -> State.update arg hd state, tl
+    | []       -> failwith "Not enough args on stack"
     in
     let s', stack' = List.fold_left folding (State.enter s @@ args @ xs, stack) args in
     cstack, stack', (s', i, o, r)
@@ -76,17 +83,19 @@ let rec eval env config =
       eval env (cstack', stack, (State.leave s' s, i, o, r)) prog
     | _ -> config
     )
-  | CALL (f, _, _) :: tl ->
+  | CALL (f, nArgs, isFunc) :: tl ->
     let cstack, stack, ((s, _, _, _) as conf) = config in
-    eval env ((tl, s)::cstack, stack, conf) @@ env#labeled f
+    if env#is_label f
+    then eval env ((tl, s)::cstack, stack, conf) @@ env#labeled f
+    else eval env (env#builtin config f nArgs isFunc) tl
   | CJMP (suf, l) :: tl ->
     let cond z = match suf with
-    | "z"   -> z =  0
-    | "nz"  -> z <> 0
+    | "z"   -> Value.to_int z =  0
+    | "nz"  -> Value.to_int z <> 0
     | other -> failwith @@ "Unknown CJMP condition " ^ other
     in (
       match config with
-      | cst, z :: stack, conf -> eval env (cst, stack, conf) (if cond z then env#labeled l else tl)
+      | cst, hd :: stack, conf -> eval env (cst, stack, conf) (if cond hd then env#labeled l else tl)
       | _ -> fail @@ CJMP (suf, l)
     )
   | insn :: tl -> eval env (evalInsn config insn) tl
@@ -111,13 +120,12 @@ let run p i =
       (object
          method is_label l = M.mem l m
          method labeled l = M.find l m
-         method builtin (cstack, stack, (st, i, o, _)) f n p =
+         method builtin (cstack, stack, (st, i, o, _)) f nArgs isFunc =
            let f = match f.[0] with 'L' -> String.sub f 1 (String.length f - 1) | _ -> f in
-           let args, stack' = split n stack in
-           let (st, i, o, r) = Language.Builtin.eval (st, i, o, None) (List.rev args) f in
-           let stack'' = if p then stack' else let Some r = r in r::stack' in
-           Printf.printf "Builtin: %s\n";
-           (cstack, stack'', (st, i, o))
+           let args, stack' = split nArgs stack in
+           let (st, i, o, r) = Builtin.eval (st, i, o, None) (List.rev args) f in
+           let stack'' = if isFunc then get r::stack' else stack' in
+           (cstack, stack'', (st, i, o, None))
        end
       )
       ([], [], (State.empty, i, [], None))
@@ -135,11 +143,15 @@ let run p i =
 let compile (defs, stmt) =
   let rec compileExpr = function
   | Expr.Const z          -> [CONST z]
+  | Expr.Array exprs      -> call "$array" (List.rev exprs) true
+  | Expr.String s         -> [STRING s]
   | Expr.Var x            -> [LD x]
   | Expr.Binop (op, a, b) -> compileExpr a @ compileExpr b @ [BINOP op]
+  | Expr.Elem (v, k)      -> call "$elem" [k; v] true
+  | Expr.Length v         -> call "$length" [v] true
   | Expr.Call (f, exprs)  -> call f exprs true
-  and call f exprs isFunc =
-    List.fold_left (fun ac e -> compileExpr e @ ac) [] exprs @ [CALL (f, List.length exprs, isFunc)]
+  and compileExprList exprs = List.fold_left (fun ac e -> compileExpr e @ ac) [] exprs
+  and call f exprs isFunc = compileExprList exprs @ [CALL (f, List.length exprs, isFunc)]
   in
 
   let label, gen = (
@@ -153,13 +165,16 @@ let compile (defs, stmt) =
     end
     )#get
   in
+
   let labelIf need l = if need then [LABEL l] else [] in
 
   let rec compile' gen lEnd =
     let start g insns = insns, false, g in
     let just = start gen in
     function
-    | Stmt.Assign (x, keys, e) -> just @@ compileExpr e @ [ST x]
+    | Stmt.Assign (x, [], e)   -> just @@ compileExpr e @ [ST x]
+    | Stmt.Assign (x, keys, e) -> just @@ compileExprList keys @
+      compileExpr e @ [STA (x, List.length keys)]
     | Stmt.Skip                -> just []
     | Stmt.Return None         -> just [RET false]
     | Stmt.Return (Some e)     -> just @@ compileExpr e @ [RET true]

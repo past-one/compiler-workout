@@ -30,13 +30,21 @@ module Value =
     let of_array  a = Array  a
 
     let update_string s i x = String.init (String.length s) (fun j -> if j = i then x else s.[j])
-    let update_array  a i x = List.init   (List.length a)   (fun j -> if j = i then x else List.nth a j)
+    let update_array  a i x =
+      let rec update_array' = function
+      | hd::tl, 0 -> x :: tl
+      | hd::tl, n -> hd :: update_array' (tl, n - 1)
+      | [], _     -> failwith "Invalid array to update"
+      in
+      update_array' (a, i)
 
   end
 
-let value (_, _, _, r) = match r with
+let get = function
 | Some v -> v
 | None   -> failwith "Trying to get None value"
+
+let value (_, _, _, r) = get r
 
 let int_value conf = Value.to_int @@ value conf
 
@@ -75,20 +83,28 @@ module State =
 module Builtin =
   struct
 
-    let eval (st, i, o, _) args = function
-    | "read"     -> (match i with z::i' -> (st, i', o, Some (Value.of_int z)) | _ -> failwith "Unexpected end of input")
-    | "write"    -> (st, i, o @ [Value.to_int @@ List.hd args], None)
-    | "$elem"    -> let [b; j] = args in
-                    (st, i, o, let i = Value.to_int j in
-                               Some (match b with
-                                     | Value.String s -> Value.of_int @@ Char.code s.[i]
-                                     | Value.Array  a -> List.nth a i
-                               )
-                    )
-    | "$length"  -> (st, i, o, Some (Value.of_int (match List.hd args with Value.Array a -> List.length a | Value.String s -> String.length s)))
-    | "$array"   -> (st, i, o, Some (Value.of_array args))
-    | "isArray"  -> let [a] = args in (st, i, o, Some (Value.of_int @@ match a with Value.Array  _ -> 1 | _ -> 0))
-    | "isString" -> let [a] = args in (st, i, o, Some (Value.of_int @@ match a with Value.String _ -> 1 | _ -> 0))
+    let eval (st, i, o, _) args =
+      let result v = (st, i, o, Some v) in
+      function
+      | "read"     -> (match i with z::i' -> (st, i', o, Some (Value.of_int z)) | _ -> failwith "Unexpected end of input")
+      | "write"    -> (st, i, o @ [Value.to_int @@ List.hd args], None)
+      | "$elem"    -> let b, j = match args with [b; j] -> b, j | _ -> failwith "Unreachable" in
+                      let i = Value.to_int j in
+                      result (match b with
+                              | Value.String s -> Value.of_int @@ Char.code s.[i]
+                              | Value.Array  a -> List.nth a i
+                              | _              -> failwith "Invalid value parameter for elem"
+                              )
+      | "$length"  ->
+        result @@ Value.of_int (match List.hd args with
+                                | Value.Array a -> List.length a
+                                | Value.String s -> String.length s
+                                | _ -> failwith "Invalid parameter for length"
+      )
+      | "$array"   -> result @@ Value.of_array args
+      | "isArray"  -> result @@ Value.of_int (match List.hd args with Value.Array  _ -> 1 | _ -> 0)
+      | "isString" -> result @@ Value.of_int (match List.hd args with Value.String _ -> 1 | _ -> 0)
+      | _          -> failwith "Unknown builtin"
 
   end
 
@@ -151,11 +167,16 @@ module Expr =
        an returns the resulting configuration
 
     *)
+
     let rec eval env ((s, _, _, _) as conf) =
       let (>>>) c e = eval env c e in
       let result (s, i, o, _) r = (s, i, o, Some r) in
       function
       | Const z          -> result conf @@ Value.of_int z
+      | Array exprs      ->
+        let args, conf' = eval_list env exprs conf in
+        env#call "$array" args conf'
+      | String s         -> result conf @@ Value.of_string s
       | Var name         -> result conf @@ State.eval s name
       | Binop (op, x, y) ->
         let c  = conf >>> x in
@@ -163,10 +184,19 @@ module Expr =
         let first  = int_value c  in
         let second = int_value c' in
         result c' @@ Value.of_int @@ binop op first second
+      | Elem (v, k)      -> 
+        let args, conf' = eval_list env [v; k] conf in
+        env#call "$elem" args conf'
+      | Length a         ->
+        let conf' = conf >>> a in
+        env#call "$length" [value conf'] conf
       | Call (f, exprs)  ->
-        let folding (tl, c) e = let c' = c >>> e in (value c' :: tl), c' in
-        let rev_args, conf' = List.fold_left folding ([], conf) exprs in
-        env#call f (List.rev rev_args) conf'
+        let args, conf' = eval_list env exprs conf in
+        env#call f args conf'
+    and eval_list env exprs conf =
+      let folding (tl, c) e = let c' = eval env c e in (value c' :: tl), c' in
+      let rev_args, conf' = List.fold_left folding ([], conf) exprs in
+      List.rev rev_args, conf'
 
     (* Expression parser. You can use the following terminals:
 
@@ -190,19 +220,27 @@ module Expr =
            `Lefta, ostapBinops ["+"; "-"];
            `Lefta, ostapBinops ["*"; "/"; "%"]
          |]
-         primary
+         all
         );
 
       call: f:IDENT "(" args:!(Util.list0 parse) ")" { Call (f, args) } ;
+
+      all:
+          v:almost "." %"length" { Length v }
+        | almost ;
+
+      almost:
+          value:primary keys:(-"[" parse -"]")*
+          { List.fold_left (fun v k -> Elem (v, k)) value keys }
+        | primary ;
 
       primary:
           call
         | x:IDENT   { Var x }
         | d:DECIMAL { Const d }
-        | s:STRING  { String s }
+        | c:CHAR    { Const (Char.code c) }
+        | s:STRING  { String (String.sub s 1 @@ String.length s - 2) }
         | "[" a:!(Util.list parse) "]" { Array a }
-        | v:parse "[" k:parse "]"      { Elem (v, k) }
-        | v:parse "." %"length"        { Length v }
         | -"(" parse -")"
     )
 
@@ -239,9 +277,11 @@ module Stmt =
           (match a with
            | Value.String s when tl = [] -> Value.String (Value.update_string s i (Char.chr @@ Value.to_int v))
            | Value.Array a               -> Value.Array  (Value.update_array  a i (update (List.nth a i) v tl))
+           | _                           -> failwith "Invalid parameter for update"
           )
       in
       State.update x (match is with [] -> v | _ -> update (State.eval st x) v is) st
+      (* State.update x (update (State.eval st x) v is) st *)
 
     let rec eval env conf k =
       let (<.>) a b = match a, b with
@@ -251,22 +291,23 @@ module Stmt =
       let (>>) c = function Skip -> c | stmt -> eval env c Skip stmt in
       let (>>>) c e = Expr.eval env conf e in
       function
-      | Skip             -> conf >> k
-      | Assign (var, keys, e)  ->
-        let (s', i', o', r) as conf' = conf >>> e in
-        (State.update var (value conf') s', i', o', None) >> k
-      | Seq (a, b)       -> eval env conf (b <.> k) a
-      | If (e, a, b)     ->
+      | Skip                  -> conf >> k
+      | Assign (var, keys, e) ->
+        let args, c = Expr.eval_list env keys conf in
+        let (s', i', o', _) as c' = c >>> e in
+        (update s' var (value c') args, i', o', None) >> k
+      | Seq (a, b)            -> eval env conf (b <.> k) a
+      | If (e, a, b)          ->
         let c' = conf >>> e in
         eval env c' k (if int_value c' <> 0 then a else b)
-      | While (e, body)  ->
+      | While (e, body)       ->
         let c' = conf >>> e in
         c' >> (if int_value c' <> 0 then Seq (body, While (e, body)) <.> k else k)
-      | Repeat (body, e) ->
+      | Repeat (body, e)      ->
         conf >> body >> (If (e, Skip, Repeat (body, e)) <.> k)
-      | Return None      -> conf
-      | Return Some e    -> conf >>> e
-      | Call (f, exprs)  -> conf >>> Expr.Call (f, exprs) >> k
+      | Return None           -> conf
+      | Return Some e         -> conf >>> e
+      | Call (f, exprs)       -> conf >>> Expr.Call (f, exprs) >> k
 
     (* Statement parser *)
 
@@ -282,11 +323,9 @@ module Stmt =
         | %"else" s:parse { s }
         | empty { Skip } ;
 
-      key: -"[" expr -"]" ;
-
       stmt:
           x:IDENT
-          keys:!(Util.list0 key)
+          keys:(-"[" expr -"]")*
           ":=" e:expr                         { Assign (x, keys, e) }
         | %"skip"                             { Skip }
         | %"return" e_opt:expr?               { Return e_opt }
