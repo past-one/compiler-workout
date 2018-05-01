@@ -1,4 +1,10 @@
 *~
+*.o
+*.s
+*.exe
 *.cmi
 *.cmx
-*.o
+*.opt
+.depend
+regression/**/*.log
+!regression/**/orig/*.log
