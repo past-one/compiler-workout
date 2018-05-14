@@ -33,14 +33,26 @@ type prg = insn list
 *)
 type config = (prg * State.t) list * Value.t list * Expr.config
 
-let fail (i: insn) = failwith @@ "Invalid instruction " ^ (GT.transform(insn) (new @insn[show]) () i)
+let showInsn i = GT.transform(insn) (new @insn[show]) () i
+
+let showAll is = String.concat "\n" @@ List.map showInsn is
+
+let fail i = failwith @@ "Invalid instruction " ^ showInsn i
 
 let split n l =
   let rec unzip (taken, rest) = function
-  | 0 -> (List.rev taken, rest)
+  | 0 -> (taken, rest)
   | n -> (match rest with h::tl -> unzip (h::taken, tl) (n-1) | _ -> failwith "Unexpected end of splitten list")
   in
   unzip ([], l) n
+
+let init f n =
+  let rec inner tail = function
+  | 0            -> (f 0) :: tail
+  | i when i > 0 -> inner ((f i) :: tail) @@ i - 1
+  | i            -> failwith @@ "Invalid init argument " ^ string_of_int i
+  in
+  List.rev @@ inner [] n
 
 (* Stack machine interpreter
 
@@ -50,7 +62,7 @@ let split n l =
    environment is used to locate a label to jump to (via method env#labeled <label_name>)
 
  *)
-let rec eval env config =
+let rec eval env ((_, stack, _) as config) allInsns =
   let evalInsn (cstack, stack, ((s, i, o, r) as c)) insn = match insn with
   | BINOP op            ->
     (match stack with
@@ -63,25 +75,52 @@ let rec eval env config =
     | _ -> fail insn
     )
   | STA (var, n)        ->
-    let (splitted, stack') = split (n + 1) stack in
-    (match splitted with
-    | hd::args -> cstack, stack', (Stmt.update s var hd args, i, o, r)
+    (match stack with
+    | hd::stack' ->
+      let (splitted, stack'') = split n stack' in
+      cstack, stack', (Stmt.update s var hd splitted, i, o, r)
     | _ -> fail insn
     )
+  | ENTER vars          ->
+    let (splitted, stack') = split (List.length vars) stack in
+    let state = List.fold_left2 (fun s x v -> State.bind x v s) State.undefined vars splitted in
+    cstack, stack', (State.push s state vars, i, o, r)
+  | SEXP (s, n)         ->
+    let (splitted, stack') = split n stack in
+    cstack, (Value.sexp s splitted)::stack', c
+  | DROP                ->
+    (match stack with
+    | _::tl    -> cstack, tl, c
+    | _ -> fail insn
+    )
+  | DUP                 ->
+    (match stack with
+    | hd::tl   -> cstack, hd::hd::tl, c
+    | _ -> fail insn
+    )
+  | SWAP                ->
+    (match stack with
+    | y::x::tl -> cstack, x::y::tl, c
+    | _ -> fail insn
+    )
+  | TAG s               ->
+    (match stack with
+    | Value.Sexp (s', _) ::tl when s = s' -> cstack, (Value.of_int 1)::tl, c
+    | _::tl                               -> cstack, (Value.of_int 0)::tl, c
+    | _ -> fail insn
+    )
+  | LEAVE               -> cstack, stack, (State.pop s, i, o, r)
   | LD var              -> cstack, State.eval s var::stack, c
   | STRING s            -> cstack, Value.of_string s::stack, c
   | CONST z             -> cstack, Value.of_int z::stack, c
   | BEGIN (_, args, xs) ->
-    let folding (state, stack) arg = match stack with
-    | hd::tl   -> State.update arg hd state, tl
-    | []       -> failwith "Not enough args on stack"
-    in
-    let s', stack' = List.fold_left folding (State.enter s @@ args @ xs, stack) args in
+    let splitted, stack' = split (List.length args) stack in
+    let s' = List.fold_left2 (fun s x v -> State.update x v s) (State.enter s @@ args @ xs) args splitted in
     cstack, stack', (s', i, o, r)
   | _                   -> fail insn
   in
 
-  function
+  match allInsns with
   | LABEL _ :: tl -> eval env config tl
   | JMP l   :: _  -> eval env config @@ env#labeled l
   | RET _   :: _
@@ -131,7 +170,7 @@ let run p i =
          method builtin (cstack, stack, (st, i, o, _)) f nArgs isFunc =
            let f = match f.[0] with 'L' -> String.sub f 1 (String.length f - 1) | _ -> f in
            let args, stack' = split nArgs stack in
-           let (st, i, o, r) = Builtin.eval (st, i, o, None) (List.rev args) f in
+           let (st, i, o, r) = Builtin.eval (st, i, o, None) args f in
            let stack'' = if isFunc then get r::stack' else stack' in
            (cstack, stack'', (st, i, o, None))
        end
@@ -148,36 +187,18 @@ let run p i =
    Takes a program in the source language and returns an equivalent program for the
    stack machine
 *)
-(*
-let compile (defs, p) = 
-  let label s = "L" ^ s in
-  let rec call f args p =
-    let args_code = List.concat @@ List.map expr args in
-    args_code @ [CALL (label f, List.length args, p)]
-  and pattern lfalse _ = failwith "Not implemented"
-  and bindings p = failwith "Not implemented"
-  and expr e = failwith "Not implemented" in
-  let rec compile_stmt l env stmt =  failwith "Not implemented" in
-  let compile_def env (name, (args, locals, stmt)) =
-    let lend, env       = env#get_label in
-    let env, flag, code = compile_stmt lend env stmt in
-    env,
-    [LABEL name; BEGIN (name, args, locals)] @
-    code @
-    (if flag then [LABEL lend] else []) @
-    [END]
- *)
 let compile (defs, stmt) =
   let rec compileExpr = function
   | Expr.Const z          -> [CONST z]
-  | Expr.Array exprs      -> call "$array" (List.rev exprs) true
+  | Expr.Array exprs      -> call ".array" exprs true
+  | Expr.Sexp (s, exprs)  -> compileExprList exprs @ [SEXP (s, List.length exprs)]
   | Expr.String s         -> [STRING s]
   | Expr.Var x            -> [LD x]
   | Expr.Binop (op, a, b) -> compileExpr a @ compileExpr b @ [BINOP op]
-  | Expr.Elem (v, k)      -> call "$elem" [k; v] true
-  | Expr.Length v         -> call "$length" [v] true
+  | Expr.Elem (v, k)      -> call ".elem" [v; k] true
+  | Expr.Length v         -> call ".length" [v] true
   | Expr.Call (f, exprs)  -> call f exprs true
-  and compileExprList exprs = List.fold_left (fun ac e -> compileExpr e @ ac) [] exprs
+  and compileExprList exprs = List.fold_left (fun ac e -> compileExpr e @ ac) [] @@ List.rev exprs
   and call f exprs isFunc = compileExprList exprs @ [CALL (f, List.length exprs, isFunc)]
   in
 
@@ -202,13 +223,16 @@ let compile (defs, stmt) =
     | Stmt.Assign (x, [], e)   -> just @@ compileExpr e @ [ST x]
     | Stmt.Assign (x, keys, e) -> just @@ compileExprList keys @
       compileExpr e @ [STA (x, List.length keys)]
+
     | Stmt.Skip                -> just []
+    | Stmt.Leave               -> just [LEAVE]
     | Stmt.Return None         -> just [RET false]
     | Stmt.Return (Some e)     -> just @@ compileExpr e @ [RET true]
     | Stmt.Call (f, exprs)     -> just @@ call f exprs false
     | Stmt.Seq (a, b)          ->
       let lMid, gen' = gen#get in
       compileStmt gen' lMid a >? lMid >> (b, lEnd)
+
     | Stmt.If (e, a, b)        ->
       let lElse, gen' = gen#get in
       start gen' (compileExpr e) >@
@@ -216,17 +240,60 @@ let compile (defs, stmt) =
       (a, lEnd) >@
       [JMP lEnd; LABEL lElse] >>
       (b, lEnd) >! true
+
     | Stmt.While  (e, s)       ->
       let lCheck, lStart, gen' = gen#get2 in
       start gen' [JMP lCheck; LABEL lStart] >>
       (s, lCheck) >@
       ([LABEL lCheck] @ compileExpr e) >@
       [CJMP ("nz", lStart)] >! false
+
     | Stmt.Repeat (s, e)       ->
       let lMid, lStart, gen' = gen#get2 in
       start gen' [LABEL lStart] >>
       (s, lMid) >? lMid >@
       (compileExpr e @ [CJMP ("z", lStart)]) >! false
+
+    | Stmt.Case (e, branches)  ->
+      let revPathElem revPath =
+        DUP :: (List.concat @@
+        List.rev_map (fun i -> [CONST i; CALL (".elem", 2, true)]) revPath
+        )
+      in
+      let rec compileCheck revPath lNext = function
+      | Stmt.Pattern.Wildcard     -> []
+      | Stmt.Pattern.Ident _      -> []
+      | Stmt.Pattern.Sexp (s, ps) ->
+        revPathElem revPath @ [TAG s; CJMP ("z", lNext)] @
+        revPathElem revPath @ [
+          CALL (".length", 1, true);
+          CONST (List.length ps);
+          BINOP "==";
+          CJMP ("z", lNext)
+        ] @ List.concat @@ List.mapi (fun i pat -> compileCheck (i::revPath) lNext pat) ps
+      in
+      let rec bind revPath = function
+      | Stmt.Pattern.Wildcard     -> []
+      | Stmt.Pattern.Ident x      -> revPathElem revPath @ [SWAP]
+      | Stmt.Pattern.Sexp (_, ps) ->
+        List.concat @@ List.mapi (fun i pat -> bind (i::revPath) pat) ps
+      in
+      let rec compileBranches (prev, _, g) = function
+      | [] -> (prev @ [DROP], true, g)
+      | (pat, stmt) :: otherBranches ->
+        let lNext, g' = g#get in
+        let body, _, g'' =
+          start g' (bind [] pat @ [DROP; ENTER (Stmt.Pattern.vars pat)]) >> (stmt, lEnd)
+        in
+        (match (compileCheck [] lNext pat) with
+        | []    -> start g'' @@ prev @ body
+        | check ->
+          let current = start g'' @@ prev @ check @ body @ [JMP lEnd; LABEL lNext] in
+          compileBranches current otherBranches
+        )
+      in
+      compileBranches (just @@ compileExpr e) branches >! true
+
   and (>?) (insns, need, g) l = insns @ labelIf need l, need, g
   and (>@) (insns, need, g) o = insns @ o, need, g
   and (>!) (insns, _, g) need = insns, need, g

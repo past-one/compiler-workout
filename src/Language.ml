@@ -11,19 +11,27 @@ open Combinators
 module Value =
   struct
 
-    @type t = Int of int | String of string | Array of t list | Sexp of string * t with show
+    @type t = Int of int | String of string | Array of t list | Sexp of string * t list with show
+
+    (* let show v = GT.transform(t) (new @t[show]) () v *)
+    let rec show = function
+    | Array a -> Printf.sprintf "[%s]" @@ String.concat ", " @@ List.map show a
+    | Sexp (s, a) -> Printf.sprintf "(%s: %s)" s @@ show @@ Array a
+    | Int i -> string_of_int i
+    | String s -> Printf.sprintf "\"%s\"" s
+    (* | v -> GT.transform(t) (new @t[show]) () v *)
 
     let to_int = function
     | Int n -> n
-    | _ -> failwith "int value expected"
+    | v -> failwith @@ "int value expected, got " ^ show v
 
     let to_string = function
     | String s -> s
-    | _ -> failwith "string value expected"
+    | v -> failwith @@ "string value expected, got " ^ show v
 
     let to_array = function
     | Array a -> a
-    | _       -> failwith "array value expected"
+    | v -> failwith @@ "array value expected, got " ^ show v
 
     let sexp   s vs = Sexp (s, vs)
     let of_int    n = Int    n
@@ -107,8 +115,10 @@ module State =
     (* Push a new local scope *)
     let push st s xs = L (xs, s, st)
 
-    (* Drop a local scope *)
-    let drop (L (_, _, e)) = e
+    (* Pop a local scope *)
+    let pop = function
+    | (L (_, _, e)) -> e
+    | G _           -> failwith "pop from global scope"
 
   end
 
@@ -124,14 +134,16 @@ module Builtin =
       | ".elem"    -> let b, j = match args with [b; j] -> b, j | _ -> failwith "Unreachable" in
                       let i = Value.to_int j in
                       result (match b with
-                              | Value.String s -> Value.of_int @@ Char.code s.[i]
-                              | Value.Array  a -> List.nth a i
-                              | _              -> failwith "Invalid value parameter for elem"
+                              | Value.String s    -> Value.of_int @@ Char.code s.[i]
+                              | Value.Array  a    -> List.nth a i
+                              | Value.Sexp (_, a) -> List.nth a i
+                              | _                 -> failwith @@ "Invalid value parameter for elem " ^ Value.show b ^ " " ^ Value.show j
                               )
       | ".length"  ->
         result @@ Value.of_int (match List.hd args with
-                                | Value.Array a -> List.length a
-                                | Value.String s -> String.length s
+                                | Value.Array a     -> List.length a
+                                | Value.Sexp (_, a) -> List.length a
+                                | Value.String s    -> String.length s
                                 | _ -> failwith "Invalid parameter for length"
       )
       | ".array"   -> result @@ Value.of_array args
@@ -209,6 +221,9 @@ module Expr =
       | Array exprs      ->
         let args, conf' = eval_list env exprs conf in
         env#call ".array" args conf'
+      | Sexp (s, exprs)  ->
+        let args, conf' = eval_list env exprs conf in
+        result conf' @@ Value.sexp s args
       | String s         -> result conf @@ Value.of_string s
       | Var name         -> result conf @@ State.eval s name
       | Binop (op, x, y) ->
@@ -273,7 +288,9 @@ module Expr =
         | d:DECIMAL { Const d }
         | c:CHAR    { Const (Char.code c) }
         | s:STRING  { String (String.sub s 1 @@ String.length s - 2) }
-        | "[" a:!(Util.list parse) "]" { Array a }
+        | "`" s:IDENT "(" l:!(Util.list parse) ")" { Sexp (s, l) }
+        | "`" s:IDENT                              { Sexp (s, []) }
+        | "[" a:!(Util.list parse) "]"             { Array a }
         | -"(" parse -")"
     )
 
@@ -292,16 +309,24 @@ module Stmt =
         (* wildcard "-"     *) | Wildcard
         (* S-expression     *) | Sexp   of string * t list
         (* identifier       *) | Ident  of string
-        with show, foldl
+        with show
 
         (* Pattern parser *)
         ostap (
-          parse: empty {failwith "Not implemented"}
+          parse:
+              %"_"                                     { Wildcard }
+            | "`" s:IDENT "(" l:!(Util.list parse) ")" { Sexp (s, l) }
+            | "`" s:IDENT                              { Sexp (s, []) }
+            | s:IDENT                                  { Ident s }
         )
 
         let vars p =
-          transform(t) (object inherit [string list] @t[foldl] method c_Ident s _ name = name::s end) [] p
-
+          let rec inner acc = function
+          | Wildcard    -> acc
+          | Ident s     -> s :: acc
+          | Sexp (s, l) -> List.fold_left inner acc l
+          in
+          List.rev @@ inner [] p
       end
 
     (* The type for statements *)
@@ -364,6 +389,43 @@ module Stmt =
       | Return None           -> conf
       | Return Some e         -> conf >>> e
       | Call (f, exprs)       -> conf >>> Expr.Call (f, exprs) >> k
+      | Leave                 ->
+        let (s', i', o', _) = conf in
+        (State.pop s', i', o', None) >> k
+      | Case (e, branches)    ->
+        let (st', i', o', r') as conf' = conf >>> e in
+        let v' = get r' in
+
+        let rec isMatching = function
+        | (Pattern.Wildcard, _) -> true
+        | (Pattern.Ident _, _)  -> true
+        | (Pattern.Sexp (s, ps), Value.Sexp (s', ps')) when s = s' ->
+          List.length ps == List.length ps' &&
+          List.fold_left (fun ac pat -> ac && isMatching pat) true @@ List.combine ps ps'
+        | _ -> false
+        in
+
+        let rec choose = function
+        | (p, s)::tl ->
+          if isMatching (p, v')
+          then Some (p, s)
+          else choose tl
+        | [] -> None
+        in
+
+        let rec assign state = function
+        | (Pattern.Ident x, v) -> State.bind x v state
+        | (Pattern.Sexp (_, ps), Value.Sexp (_, ps')) ->
+          List.fold_left assign state @@ List.combine ps ps'
+        | _ -> state
+        in
+
+        (match choose branches with
+        | None        -> conf' >> k
+        | Some (p, s) ->
+          let st'' = assign State.undefined (p, v') in
+          (State.push st' st'' (Pattern.vars p), i', o', None) >> (s <.> k)
+        )
 
     (* Statement parser *)
 
@@ -379,6 +441,8 @@ module Stmt =
         | %"else" s:parse { s }
         | empty { Skip } ;
 
+      case_branch: p:!(Pattern.parse) "->" s:parse { p, Seq (s, Leave) } ;
+
       stmt:
           x:IDENT
           keys:(-"[" expr -"]")*
@@ -387,6 +451,9 @@ module Stmt =
         | %"return" e_opt:expr?               { Return e_opt }
         | %"while" e:expr %"do" s:parse %"od" { While (e, s) }
         | %"repeat" s:parse %"until" e:expr   { Repeat (s, e) }
+        | %"case" e:expr %"of"
+          branches:!(Util.listBy (ostap ("|")) case_branch)
+          %"esac"                             { Case (e, branches) }
         | %"if" e:expr %"then"
           s1:parse s2:else_stmt %"fi"         { If (e, s1, s2) }
         | %"for" start:parse ","
