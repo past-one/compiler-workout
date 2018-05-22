@@ -91,7 +91,7 @@ open SM
    of x86 instructions
 *)
 let compile environment code =
-  let swap a b = match a, b with (* we can't move data directly from stack to memory or vice versa *)
+  let move a b = match a, b with (* we can't move data directly from stack to memory or vice versa *)
   | R _, _ -> [Mov (a, b)]
   | _, R _ -> [Mov (a, b)]
   | _      -> [Mov (a, eax); Mov (eax, b)]
@@ -104,6 +104,44 @@ let compile environment code =
     Mov (edx, b)
     ]
   in
+  let apply (a, b) f = b, f a in
+  let hash s =
+    let charCode = function
+    | '_'            -> 53
+    | c when c > 'Z' -> Char.code c - 70
+    | c              -> Char.code c - 64
+    in
+    let len = min 5 @@ String.length s in
+    let rec hash' acc = function
+    | k when k >= len -> acc
+    | k               -> hash' ((acc lsl 6) lor (charCode s.[k])) @@ k + 1
+    in
+    hash' 0 0
+  in
+
+  let call env f args isFunc =
+    let argsNum = List.length args in
+    let argPushes = List.map (fun arg -> Push arg) args in
+    let argPushes =
+      if f = "Barray"
+      then argPushes @ [Push (L argsNum)]
+      else argPushes
+    in
+    let argPop = match argsNum with
+    | 0 -> []
+    | _ -> [Binop ("+", L (argsNum * word_size), esp)]
+    in
+
+    let regs = env#live_registers in
+    let regPushes = List.map (fun r -> Push r) regs in
+    let regPops = List.rev_map (fun r -> Pop r) regs in
+    let env', resultPop =
+      if isFunc
+      then apply env#allocate @@ fun x -> [Mov (eax, x)]
+      else env, []
+    in
+    env', regPushes @ argPushes @ [Call f] @ argPop @ regPops @ resultPop
+  in
 
   let compileInsn env i = match i with
   | JMP l       -> env, [Jmp l]
@@ -114,42 +152,53 @@ let compile environment code =
     Meta (Printf.sprintf "\t.set %s, %d" env#lsize (env#allocated * word_size))
   ] (* epilog *)
 
-  | RET true    -> let x, env' = env#pop                   in env', [Mov (x, eax); Jmp env#epilogue]
-  | CONST z     -> let x, env' = env#allocate              in env', [Mov (L z, x)]
-  | ST var      -> let x, env' = (env#global var)#pop      in env', swap x @@ env#loc var
-  | LD var      -> let x, env' = (env#global var)#allocate in env', swap (env#loc var) x
+  | RET true    -> apply env#pop                   @@ fun x -> [Mov (x, eax); Jmp env#epilogue]
+  | CONST z     -> apply env#allocate              @@ fun x -> [Mov (L z, x)]
+  | ST var      -> apply (env#global var)#pop      @@ fun x -> move x @@ env#loc var
+  | LD var      -> apply (env#global var)#allocate @@ fun x -> move (env#loc var) x
 
-  | CJMP (k, l) -> (
-    match env#pop with
-    | (R _) as x, env' -> env',                        [Binop ("cmp", L 0, x); CJmp (k, l)]
-    | x,          env' -> env', [Binop ("^", eax, eax); Binop ("cmp", eax, x); CJmp (k, l)]
+  | CJMP (k, l) -> apply env#pop (function
+    | (R _) as x ->                        [Binop ("cmp", L 0, x); CJmp (k, l)]
+    | x          -> [Binop ("^", eax, eax); Binop ("cmp", eax, x); CJmp (k, l)]
   )
+
+  | DROP  -> snd @@ env#pop, []
+  | DUP   ->
+    let xFrom = env#look in
+    let xTo, env' = env#allocate in
+    env', move xFrom xTo
+  | SWAP  -> env#swap, []
+  | STRING s ->
+    let str, env' = env#string s in
+    call env' "Bstring" [M ("$" ^ str)] true
+  | SEXP (s, length) ->
+    let t = hash s in
+    let args, env' = env#popN length in
+    call env' "Bsexp" (L t :: (args @ [L length])) true
+  | STA (var, n) ->
+    let value, env' = (env#global var)#pop in
+    let args, env'' = env'#popN n in
+    call env'' "Bsta" (args @ [env''#loc var; value; L n]) true
+  | TAG s ->
+    let t = hash s in
+    let arg, env' = env#pop in
+    call env' "Btag" [L t; arg] true
+  | ENTER vars -> failwith "Not implemented"
+  | LEAVE -> failwith "Not implemented"
 
   | BEGIN (f, args, vars) ->
     let env' = env#enter f args vars in
     env', [Push ebp; Mov (esp, ebp); Binop ("-", M ("$" ^ env'#lsize), esp)] (* prolog *)
   | CALL (f, argsNum, isFunc) ->
-    let rec pushArgs pushed e = function
-    | 0 -> pushed, e
-    | n -> let x, e' = e#pop in pushArgs (Push x :: pushed) e' @@ n - 1
+    let f' =
+      if f.[0] = '.'
+      then "B" ^ String.sub f 1 (String.length f - 1)
+      else f
     in
-    let argPushes, env' = pushArgs [] env argsNum in
-    let argPop = match argsNum with
-    | 0 -> []
-    | _ -> [Binop ("+", L (argsNum * word_size), esp)]
-    in
+    let args, env' = env#popN argsNum in
+    call env' f' args isFunc
 
-    let regs = env'#live_registers argsNum in
-    let regPushes = List.map (fun r -> Push r) regs in
-    let regPops = List.rev_map (fun r -> Pop r) regs in
-    let resultPop, env'' =
-      if isFunc
-      then let x, e' = env'#allocate in [Mov (eax, x)], e'
-      else [], env'
-    in
-    env'', regPushes @ argPushes @ [Call f] @ argPop @ regPops @ resultPop
-
-  | BINOP op -> let x, y, env' = env#popAndLook in env', (
+  | BINOP op -> let x, env' = env#pop in let y = env'#look in env', (
     let cmpF a b suf = [
       Mov (a, edx);
       Binop ("^", eax, eax); (* set eax to zero first *)
@@ -219,8 +268,16 @@ class env =
       let x, n =
         let rec allocate' = function
         | []                            -> ebx       , 0
-        | (S n)::_                      -> S (n + 1) , n + 2
-        | (R n)::_ when n < num_of_regs -> R (n + 1) , stack_slots
+        | S n :: S m :: _               ->
+          let next = (max n m) + 1 in      S next    , next + 1
+        | R _ :: S n :: _
+        | S n :: _                      -> S (n + 1) , n + 2
+        | R n :: R m :: _               ->
+          let next = (max n m) + 1 in
+          if next <= num_of_regs
+          then                             R next    , 0
+          else                             S 0       , 1
+        | R n :: _ when n < num_of_regs -> R (n + 1) , 0
         | _                             -> S 0       , 1
         in
         allocate' stack
@@ -234,12 +291,26 @@ class env =
       | _         -> failwith "pop with empty symbolic stack"
       )
 
-    (* pops one operand from the symbolic stack and also returns current stack head *)
-    method popAndLook = (
+    (* pops n operands from the symbolic stack *)
+    method popN n =
+      let rec popN' env args = function
+      | 0 -> List.rev args, env
+      | n -> let x, env' = env#pop in popN' env' (x :: args) @@ n - 1
+      in
+      popN' self [] n
+
+    (* returns current stack head *)
+    method look = (
       match stack with
-        | x::y::stack' -> x, y, {< stack = y::stack' >}
-        | _            -> failwith "popAndLook with empty symbolic stack"
-    )
+      | x::_ -> x
+      | _    -> failwith "look with empty symbolic stack"
+      )
+
+    method swap = (
+      match stack with
+      | x::y::tl -> {< stack = y::x::tl >}
+      | _       -> failwith "swap with empty symbolic stack"
+      )
 
     (* registers a global variable in the environment *)
     method global x  = {< globals = S.add ("global_" ^ x) globals >}
@@ -259,11 +330,11 @@ class env =
     method strings = M.bindings stringm
 
     (* gets a number of stack positions allocated *)
-    method allocated = stack_slots
+    method allocated = stack_slots + List.length locals
 
     (* enters a function *)
     method enter f a l = {<
-      stack_slots = List.length l;
+      stack_slots = 0;
       stack = [];
       locals = make_assoc l;
       args = make_assoc a;
@@ -271,19 +342,13 @@ class env =
       >}
 
     (* returns a label for the epilogue *)
-    method epilogue = Printf.sprintf "L%s_epilogue" fname
+    method epilogue = fname ^ "_epilogue"
 
     (* returns a name for local size meta-symbol *)
-    method lsize = Printf.sprintf "L%s_SIZE" fname
+    method lsize = fname ^ "_SIZE" 
 
     (* returns a list of live registers *)
-    method live_registers depth =
-      let rec inner d acc = function
-      | []             -> acc
-      | (R _ as r)::tl -> inner (d+1) (if d >= depth then (r::acc) else acc) tl
-      | _::tl          -> inner (d+1) acc tl
-      in
-      inner 0 [] stack
+    method live_registers = List.filter (function R _ -> true | _ -> false) stack
 
   end
 
@@ -301,13 +366,13 @@ let genasm (ds, stmt) =
                                (List.map (fun (s, v) -> Meta (Printf.sprintf "%s:\t.string\t\"%s\"" v s)) env#strings) in
   let asm = Buffer.create 1024 in
   List.iter
-    (fun i -> Buffer.add_string asm (Printf.sprintf "%s\n" @@ show i))
+    (fun i -> Buffer.add_string asm (show i ^ "\n"))
     (data @ [Meta "\t.text"; Meta "\t.globl\tmain"] @ code);
   Buffer.contents asm
 
 (* Builds a program: generates the assembler file and compiles it with the gcc toolchain *)
 let build prog name =
-  let outf = open_out (Printf.sprintf "%s.s" name) in
+  let outf = open_out (name ^ ".s") in
   Printf.fprintf outf "%s" (genasm prog);
   close_out outf;
   let inc = try Sys.getenv "RC_RUNTIME" with _ -> "../runtime" in

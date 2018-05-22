@@ -197,7 +197,7 @@ let compile (defs, stmt) =
   | Expr.Binop (op, a, b) -> compileExpr a @ compileExpr b @ [BINOP op]
   | Expr.Elem (v, k)      -> call ".elem" [v; k] true
   | Expr.Length v         -> call ".length" [v] true
-  | Expr.Call (f, exprs)  -> call f exprs true
+  | Expr.Call (f, exprs)  -> call (Printf.sprintf "L%s" f) exprs true
   and compileExprList exprs = List.fold_left (fun ac e -> compileExpr e @ ac) [] @@ List.rev exprs
   and call f exprs isFunc = compileExprList exprs @ [CALL (f, List.length exprs, isFunc)]
   in
@@ -228,7 +228,7 @@ let compile (defs, stmt) =
     | Stmt.Leave               -> just [LEAVE]
     | Stmt.Return None         -> just [RET false]
     | Stmt.Return (Some e)     -> just @@ compileExpr e @ [RET true]
-    | Stmt.Call (f, exprs)     -> just @@ call f exprs false
+    | Stmt.Call (f, exprs)     -> just @@ call (Printf.sprintf "L%s" f) exprs false
     | Stmt.Seq (a, b)          ->
       let lMid, gen' = gen#get in
       compileStmt gen' lMid a >? lMid >> (b, lEnd)
@@ -304,9 +304,10 @@ let compile (defs, stmt) =
 
   let rec compileDefs gen defs =
     let folding (insns, g) (f, (args, vars, body)) =
+      let f' = Printf.sprintf "L%s" f in
       let l, g' = g#get in
       let result, _, g'' = compileStmt g' l body >? l in
-      insns @ [LABEL f; BEGIN (f, args, vars)] @ result @ [END], g''
+      insns @ [LABEL f'; BEGIN (f', args, vars)] @ result @ [END], g''
     in
     fst @@ List.fold_left folding ([], gen) defs
   in
