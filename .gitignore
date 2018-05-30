@@ -1,7 +1,6 @@
 *~
 *.o
 *.s
-*.exe
 *.cmi
 *.cmx
 *.opt
